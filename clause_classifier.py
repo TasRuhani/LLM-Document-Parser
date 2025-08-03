@@ -5,11 +5,9 @@ class ClauseClassifier:
     def __init__(self, model_path="./model/legal-bert-finetuned", threshold=0.5):
         self.tokenizer = AutoTokenizer.from_pretrained(model_path)
 
-        # Load config and set number of labels explicitly
         config = AutoConfig.from_pretrained(model_path)
-        config.num_labels = 41  # Hardcoded to match your trained model
+        config.num_labels = 41 
         
-        # Load model and force it to CPU to avoid meta tensor issues
         self.model = AutoModelForSequenceClassification.from_pretrained(model_path, config=config)
         self.model.eval()
         self.model.to("cpu")
@@ -18,7 +16,6 @@ class ClauseClassifier:
         self.label_list = list(self.model.config.id2label.values())
 
     def predict(self, clause_text):
-        # Tokenize and move inputs to CPU
         inputs = self.tokenizer(clause_text, return_tensors="pt", truncation=True, padding=True)
         inputs = {k: v.to("cpu") for k, v in inputs.items()}
 
@@ -26,7 +23,6 @@ class ClauseClassifier:
             logits = self.model(**inputs).logits
             probs = torch.sigmoid(logits).squeeze().cpu().numpy()
 
-        # Filter predictions based on threshold
         predictions = [
             (self.label_list[i], float(probs[i]))
             for i in range(len(probs))

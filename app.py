@@ -9,16 +9,13 @@ from semantic_search import semantic_search
 from decision_engine import get_decision_llm
 from clause_classifier import ClauseClassifier
 
-# Page setup
 st.set_page_config(page_title="LLM Clause Reasoner", layout="wide")
 st.title("LLM-Powered Policy Clause Reasoner")
 
-# Upload multiple files
 uploaded_files = st.file_uploader("Upload policy documents (PDF, DOCX, or TXT email)", type=["pdf", "docx", "txt"], accept_multiple_files=True)
 query = st.text_area("Enter your query", height=100)
 run = st.button("🔍 Process Query")
 
-# Initialize clause classifier
 classifier = ClauseClassifier(model_path="./model/legal-bert-finetuned", threshold=0.3)
 
 def read_uploaded_file(file):
@@ -31,7 +28,6 @@ def read_uploaded_file(file):
     else:
         return ""
 
-# Process pipeline
 if uploaded_files and query and run:
     with st.spinner("Reading documents..."):
         combined_text = ""
@@ -61,7 +57,7 @@ if uploaded_files and query and run:
         st.subheader("Justification")
         st.write(justification)
 
-    # Display retrieved clauses + predicted clause types
+    # Display 
     st.subheader("Retrieved Clauses and Predicted Clause Types")
     for i, clause in enumerate(retrieved):
         st.markdown(f"**Clause {i+1}:** {clause}")
