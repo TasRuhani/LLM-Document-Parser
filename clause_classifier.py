@@ -4,7 +4,7 @@ import torch
 from transformers import AutoTokenizer, AutoModelForSequenceClassification, AutoConfig
 
 class ClauseClassifier:
-    def __init__(self, model_path="./model/legal-bert-finetuned-context", threshold=0.5):
+    def __init__(self, model_path="./model/legal-bert-finetuned", threshold=0.5):
         self.tokenizer = AutoTokenizer.from_pretrained(model_path)
 
         # Load config and set number of labels explicitly
