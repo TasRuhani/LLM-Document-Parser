@@ -19,7 +19,7 @@ query = st.text_area("Enter your query", height=100)
 run = st.button("🔍 Process Query")
 
 # Initialize clause classifier
-classifier = ClauseClassifier(model_path="./model/legal-bert-finetuned-context", threshold=0.3)
+classifier = ClauseClassifier(model_path="./model/legal-bert-finetuned", threshold=0.3)
 
 def read_uploaded_file(file):
     if file.name.endswith(".pdf"):
