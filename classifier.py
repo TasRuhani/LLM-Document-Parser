@@ -2,7 +2,8 @@ from transformers import AutoTokenizer, AutoModelForSequenceClassification, Auto
 import torch
 
 class ClauseClassifier:
-    def __init__(self, model_path="./model/legal-bert-finetuned", threshold=0.3, device="cpu"):
+    # Increased batch size and threshold for performance and relevance
+    def __init__(self, model_path="./model/legal-bert-finetuned", threshold=0.5, device="cpu"):
         self.tokenizer = AutoTokenizer.from_pretrained(model_path)
         config = AutoConfig.from_pretrained(model_path)
         config.num_labels = 41
@@ -13,7 +14,7 @@ class ClauseClassifier:
         self.label_list = list(self.model.config.id2label.values())
         self.device = device
 
-    def predict(self, texts, batch_size=32):
+    def predict(self, texts, batch_size=64): # Increased batch size
         predictions = []
         for i in range(0, len(texts), batch_size):
             batch_texts = texts[i:i+batch_size]

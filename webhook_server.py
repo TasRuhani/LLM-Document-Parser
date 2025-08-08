@@ -1,14 +1,22 @@
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Request, Depends, HTTPException, status
 from fastapi.responses import JSONResponse
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 import uvicorn
 from pydantic import BaseModel
 import os
 import json
 import re
-import redis
 import torch
-import multiprocessing as mp
-from openai import OpenAI
+import requests
+import tempfile
+import io
+import asyncio
+from urllib.parse import urlparse
+
+# Async-ready libraries
+import redis.asyncio as aioredis
+from openai import AsyncOpenAI
+
 from sentence_transformers import SentenceTransformer
 
 # Import modules from your project
@@ -20,9 +28,9 @@ from extractors import (
     extract_text_from_msg
 )
 from faiss_utils import build_faiss_index, semantic_search
-from processing import chunk_text, embed_with_cache
+from processing import chunk_text, embed_with_cache_async
 from classifier import ClauseClassifier
-from llm_utils import parse_query_with_llm, get_decision_llm
+from llm_utils import get_direct_answer_async
 
 app = FastAPI()
 
@@ -30,79 +38,103 @@ app = FastAPI()
 OPENROUTER_API_KEY, OPENROUTER_MODEL = get_openrouter_keys()
 
 if not OPENROUTER_API_KEY or not OPENROUTER_MODEL:
-    raise ValueError("OpenRouter API key or model not found. Please set them in your .env file.")
+    raise ValueError("OpenRouter API key or model not found in .env file.")
 
-client = OpenAI(
+# Use AsyncOpenAI client
+client = AsyncOpenAI(
     base_url="https://openrouter.ai/api/v1",
     api_key=OPENROUTER_API_KEY,
 )
 
-redis_client = redis.Redis(host="localhost", port=6379, db=0)
+# Use async redis client
+redis_client = aioredis.from_url("redis://localhost:6379", db=0)
 device = "cuda" if torch.cuda.is_available() else "cpu"
 
 # ---------------- Load models globally for efficiency ----------------
-# This ensures models are only loaded once when the server starts
 embedder = SentenceTransformer("all-MiniLM-L6-v2", device=device)
 classifier = ClauseClassifier(model_path="./model/legal-bert-finetuned", device=device)
 
-
 # ---------------- Define the data model for the webhook payload ----------------
-# This is a good practice for validating incoming data
 class ClaimRequest(BaseModel):
-    query: str
-    documents: list  # Assuming documents are file-like objects or paths
+    documents: str
+    questions: list[str]
 
+# ---------------- Authentication ----------------
+security = HTTPBearer()
+EXPECTED_TOKEN = "98e1dde7d1f85ec2a9339f39b927d66f8766461fa06a087cea0c9c8daf5c43d4"
 
-@app.post("/api/v1/hackrx/run")
-async def run_parser(request: Request):
+async def verify_token(credentials: HTTPAuthorizationCredentials = Depends(security)):
+    if credentials.scheme != "Bearer" or credentials.credentials != EXPECTED_TOKEN:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid or missing token",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    return credentials
+
+# ---------------- Main API Endpoint ----------------
+@app.post("/api/v1/hackrx/run", dependencies=[Depends(verify_token)])
+async def run_parser(claim_request: ClaimRequest):
     try:
-        data = await request.json()
-        claim_request = ClaimRequest(**data)
-    except Exception as e:
-        return JSONResponse(status_code=400, content={"error": f"Invalid request format: {e}"})
-
-    try:
-        # --- 1. Process documents to get chunks, embeddings, and classified data ---
-        all_text = ""
-        for doc in claim_request.documents:
-            all_text += doc + "\n"
-
-        chunks = chunk_text(all_text)
-        embeddings = embed_with_cache(chunks, embedder, redis_client)
-        index = build_faiss_index(embeddings)
-
-        classified_predictions = classifier.predict(chunks)
-        classified_chunks = list(zip(chunks, classified_predictions))
-
-        # --- 2. Perform semantic search and LLM calls ---
-        retrieved = semantic_search(claim_request.query, chunks, index, embedder)
-
-        relevant_clauses = []
-        for clause, preds in classified_chunks:
-            if any(label.lower() in claim_request.query.lower() for label, _ in preds):
-                relevant_clauses.append(clause)
-        if not relevant_clauses:
-            relevant_clauses = retrieved
-
-        structured = parse_query_with_llm(client, OPENROUTER_MODEL, claim_request.query)
-        decision_json = get_decision_llm(client, OPENROUTER_MODEL, structured, "\n".join(relevant_clauses))
-
+        # --- 1. Download and Extract Text ---
+        doc_url = claim_request.documents
         try:
-            data = json.loads(decision_json)
-        except Exception:
-            match = re.search(r'"justification"\s*:\s*"([^"]+)"', decision_json)
-            data = {"decision": "N/A", "justification": match.group(1) if match else decision_json}
+            response = await asyncio.to_thread(requests.get, doc_url)
+            response.raise_for_status()
+            file_content = response.content
+        except requests.exceptions.RequestException as req_e:
+            return JSONResponse(status_code=500, content={"error": f"Failed to download document: {req_e}"})
 
-        # --- 3. Return the final decision ---
-        return JSONResponse(content={
-            # "decision": data.get("decision", "?"),
-            "justification": data.get("justification", "No justification."),
-        })
+        parsed_url = urlparse(doc_url)
+        path = parsed_url.path
+        
+        if path.lower().endswith(".pdf"):
+            all_text = await asyncio.to_thread(extract_text_from_pdf, io.BytesIO(file_content))
+        elif path.lower().endswith(".docx"):
+            all_text = await asyncio.to_thread(extract_text_from_docx, io.BytesIO(file_content))
+        else:
+            return JSONResponse(status_code=400, content={"error": "Unsupported document type."})
+
+        if not all_text.strip():
+            return JSONResponse(status_code=400, content={"error": "No text extracted from document."})
+
+        # --- 2. Process Text into Embeddings and Index ---
+        chunks = await asyncio.to_thread(chunk_text, all_text)
+        embeddings = await embed_with_cache_async(chunks, embedder, redis_client)
+        index = await asyncio.to_thread(build_faiss_index, embeddings)
+        
+        # --- 3. Generate Answers for All Questions in Parallel ---
+        async def generate_answer(question: str):
+            # Find relevant clauses using semantic search
+            retrieved_clauses = await asyncio.to_thread(
+                semantic_search, question, chunks, index, embedder, top_k=5
+            )
+            
+            # Call the LLM function for direct Q&A
+            answer = await get_direct_answer_async(
+                client, OPENROUTER_MODEL, question, "\n".join(retrieved_clauses)
+            )
+
+            # PATCH: Added a 1-second delay to avoid free-tier rate limits.
+            await asyncio.sleep(1)
+
+            return answer
+
+        # Create and run all question-answering tasks concurrently
+        tasks = [generate_answer(q) for q in claim_request.questions]
+        answers = await asyncio.gather(*tasks, return_exceptions=True)
+
+        processed_answers = []
+        for ans in answers:
+            if isinstance(ans, Exception):
+                processed_answers.append(f"Error generating answer: {str(ans)}")
+            else:
+                processed_answers.append(ans)
+        
+        return JSONResponse(content={"answers": processed_answers})
 
     except Exception as e:
-        # Return a 500 Internal Server Error if something goes wrong
-        return JSONResponse(status_code=500, content={"error": str(e)})
-
+        return JSONResponse(status_code=500, content={"error": f"An unexpected server error occurred: {str(e)}"})
 
 if __name__ == "__main__":
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    uvicorn.run("webhook_server:app", host="0.0.0.0", port=8000, reload=True)
