@@ -15,7 +15,7 @@ from extractors import (
 from faiss_utils import build_faiss_index, semantic_search
 from processing import chunk_text, embed_with_cache
 from classifier import ClauseClassifier
-from llm_utils import parse_query_with_llm, get_decision_llm
+from llm_utils import parse_query_with_llm_async, get_decision_llm_async
 
 import redis
 import torch
@@ -100,7 +100,7 @@ run = st.button("Run Query")
 if run and query and st.session_state.index:
     start_time_query = time.time()
     with st.spinner("Parsing query..."):
-        structured = parse_query_with_llm(client, OPENROUTER_MODEL, query)
+        structured = _parse_query_with_llm_async(client, OPENROUTER_MODEL, query)
 
     with st.spinner("Searching relevant clauses..."):
         retrieved = semantic_search(query, st.session_state.chunks, st.session_state.index, embedder)
@@ -114,7 +114,7 @@ if run and query and st.session_state.index:
             relevant_clauses = retrieved
 
     with st.spinner("Getting decision from LLM..."):
-        decision_json = get_decision_llm(client, OPENROUTER_MODEL, structured, "\n".join(relevant_clauses))
+        decision_json = get_decision_llm_async(client, OPENROUTER_MODEL, structured, "\n".join(relevant_clauses))
     try:
         data = json.loads(decision_json)
     except Exception:

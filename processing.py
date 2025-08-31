@@ -2,6 +2,7 @@ import re
 import hashlib
 import json
 import numpy as np
+import asyncio
 
 # Define a TTL for cache entries (e.g., 24 hours in seconds)
 CACHE_TTL_SECONDS = 24 * 60 * 60
